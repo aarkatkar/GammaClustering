@@ -1,0 +1,180 @@
+---
+title: "Gamma Clustering"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{introduction}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+To get started, load the "GammaClustering" library
+
+```{r setup}
+library(GammaClustering)
+```
+
+The gamma clustering algorithm requires a log2(fold change) matrix of
+dimensions (n_genes, n_samples). Here, we create such a matrix starting
+from differential expression data obtained from DESeq2.
+
+```{r}
+# Read in the source data
+fc <- read.csv("../../fold_change.csv", row.names=1)
+pvals <- read.csv("../../adj_p.csv", row.names=1)
+
+# Filter genes by p < 0.05 and |FC|>1.5 in at least one mouse strain
+fc[is.na(fc)]=0
+pvals[is.na(pvals)]=1
+keep <- which(apply((pvals<0.05)*(abs(fc)>log2(1.5)),1, any))
+x <- as.matrix(fc[keep,])
+dim(x)
+```
+
+To run any of the analysis for gamma clustering, we need to create a
+gmatrix object. Conventionally, gene clustering has been performed on
+the "Pearson Distance," which is just one minus the correlation
+coefficient. The equivalent here is to set squared=FALSE.
+
+```{r}
+# Create a gmatrix object that does not square correlation coefficients
+gm <- gmatrix(x, squared=FALSE)
+```
+
+Gamma clustering begins with n "seeds", which are a set of genes from
+which clustering begins. In practice, n reflects an upper bound on the
+number of clusters that will be identified. To find the optimal value of
+n, we take the value that maximizes the average clustering certainty.
+This is similar to the silhouette method that is often used in similar
+contexts.
+
+```{r, fig.width=7, fig.height=5}
+# Test values of n from 2 to 15
+gctest(2, 15, gm)
+```
+
+As shown, the optimal value of n is 7. Next, we run gamma clustering
+using this parameter and visualize the clustering with Uniform Manifold
+Approximation and Projection (UMAP).
+
+```{r, fig.width=7, fig.height=5}
+clust <- gcluster(gm, n=7)
+clust.labels <- clust$labels
+gammaplot(gm, clust.labels)
+```
+
+Genes belonging to a cluster can be readily obtained using the cluster
+labels. From there, gene ontology and pathway analysis can be
+considered.
+
+```{r}
+# Obtain a list of genes in cluster #3
+rownames(x)[clust.labels==3]
+```
+
+An important aspect of the Pearson Distance is that it only groups
+together genes by positive correlation. However, negative correlations
+can also be an indication of gene-gene interactions. Thus, we recommend
+keeping the default setting of squared=TRUE for gmatrix
+
+```{r, fig.width=7, fig.height=5}
+gm <- gmatrix(x)
+gctest(2, 15, gm)
+clust <- gcluster(gm, n=6)
+clust.labels <- clust$labels
+gammaplot(gm, clust.labels)
+rownames(x)[clust.labels==5]
+```
+
+Now that genes have been clustered, we can consider the relationship
+between these clusters and observable phenotypes. Here, the file
+"phenotypes.csv" contains the TCDD burden, change in fat percentage, and
+change in body weight gain for each of the mouse strains studied.
+
+```{r}
+phen <- as.matrix(read.csv("../../phenotypes.csv", row.names=1))
+```
+
+The conventional approach to obtaining a p-value for a correlation
+assumes two normal distributions. However, in our data, we are
+specifically looking at differentially expressed genes. This means that
+the distributions being correlated are not necessarily random. Hence, we
+can do a permutation test to obtain more reliable p-values based on the
+null hypothesis that the two genes are both DEGs in at least one mouse
+strain. This permutation test shuffles the entire data set, so only a
+few iterations are needed for consistent results. To ensure reproducible
+results, we must also seed the random number generation to start.
+
+```{r}
+set.seed(2)
+ph_gm <- gmatrix(x, phen, permuted=5)
+```
+
+From this matrix, and the previous clustering, we can look at the
+maximum likelihood path and the path of maximum information flow for
+TCDD burden to change in fat percentage.
+
+```{r, fig.width=7, fig.height=5}
+gc_path("TCDD", "Fat", ph_gm, clust.labels)
+gc_max_flow("TCDD", "Fat", ph_gm, clust.labels)
+```
+
+Of course, correlation does not imply causation, and a number of
+confounding factors may explain observed correlations. Toward this end,
+gamma clustering offers a few ways to correct for some of these
+confounding factors.
+
+-   Partial correlations: This lessens the correlation between two genes
+    that are in fact separately correlated to an auxiliary gene(s)
+    instead.
+
+-   Quantile normalization: This lessens the confounding, population
+    effects, such as one mouse strain showing more differential
+    expression than the others.
+
+-   Distance matrix: The membership of a gene to a cluster reflects the
+    correlation to all genes in the cluster instead of the nearest gene
+    in the cluster. Although this aggregate effect is less sensitive to
+    outliers, it is often the case that any "real" correlation is an
+    interesting correlation, and these may be buried using this method.
+
+```{r, fig.width=7, fig.height=5}
+gm <- gmatrix(x, partial=TRUE, normalization=TRUE)
+gctest(2, 20, gm, method="distance")
+clust <- gcluster(gm, n=16, method="distance")
+clust.labels <- clust$labels
+gammaplot(gm, clust.labels)
+set.seed(2)
+ph_gm <- gmatrix(x, phen, permuted=5, partial=TRUE, normalization=TRUE)
+gc_path("TCDD", "Fat", ph_gm, clust.labels)
+gc_max_flow("TCDD","Fat",ph_gm, clust.labels)
+
+```
+
+As cluster 6 appears significant in connecting TCDD burden to fat
+percentage, can look at what genes are present in this cluster
+
+```{r}
+# Find the genes present in cluster 6
+rownames(x)[clust.labels==6]
+
+```
+
+Interestingly, many of the genes identified with the unadjusted
+methodology still show up in this cluster. Finally, we can ask whether
+any genes in the cluster have a significant, overall correlation to
+other genes in the cluster.
+
+```{r}
+# Find the most central genes in cluster 6
+rownames(x)[clust.labels==6 & clust$pvals < 0.05]
+```
